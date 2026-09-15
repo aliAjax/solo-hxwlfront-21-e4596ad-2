@@ -499,21 +499,29 @@ export function analyze(
     }
   }
 
-  // 实时缺口：用当前库存重算
-  const areaProfiles = profiles.filter((p) => p.area === plan.area);
-  const liveGaps = computeGaps(areaProfiles);
+  // 剩余缺口（以本计划生成时快照为基准，保证顶部指标与回看表口径一致）：
+  // 已执行站点按实收量抵扣，未执行站点按计划量抵扣；撤销执行即恢复按计划量抵扣。
   const plannedMap = new Map<string, number>();
+  const actualMap = new Map<string, number>();
+  const executedKeys = new Set<string>();
   for (const shift of plan.shifts) {
     for (const stop of shift.stops) {
       const k = `${stop.stationId}|${stop.productCode}`;
       plannedMap.set(k, (plannedMap.get(k) ?? 0) + (Number(stop.qty) || 0));
+      if (stop.executedAt) {
+        executedKeys.add(k);
+        actualMap.set(k, (actualMap.get(k) ?? 0) + (Number(stop.actualQty) || 0));
+      }
     }
   }
 
   const reasonMap = new Map(plan.unmet.map((u) => [`${u.stationId}|${u.productCode}`, u.reason]));
-  const remaining = liveGaps.map((d) => {
-    const planned = plannedMap.get(`${d.stationId}|${d.productCode}`) ?? 0;
-    const left = Math.max(d.gap - planned, 0);
+  const remaining = plan.demandSnapshot.map((d) => {
+    const k = `${d.stationId}|${d.productCode}`;
+    const planned = plannedMap.get(k) ?? 0;
+    // 执行后按实收抵扣；未执行按计划量抵扣
+    const covered = executedKeys.has(k) ? actualMap.get(k) ?? 0 : planned;
+    const left = Math.max(d.gap - covered, 0);
     return {
       stationId: d.stationId,
       stationName: d.stationName,
@@ -522,7 +530,7 @@ export function analyze(
       gap: left,
       capacity: d.capacity,
       stock: d.stock,
-      reason: left > 0 ? reasonMap.get(`${d.stationId}|${d.productCode}`) : undefined
+      reason: left > 0 ? reasonMap.get(k) : undefined
     };
   });
   const unmetRows = remaining.filter((r) => r.gap > 0);
